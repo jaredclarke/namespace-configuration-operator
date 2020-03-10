@@ -168,8 +168,6 @@ func (r *ReconcileNamespaceConfig) Reconcile(request reconcile.Request) (reconci
 	}
 	ownerLabelValue := instance.GetNamespace() + "-" + instance.GetName()
 	ownerSelector := operatorLabel + "=" + ownerLabelValue
-	// object defined by this instance
-	objects, err := getObjects(instance)
 	if util.IsBeingDeleted(instance) {
 		if !util.HasFinalizer(instance, finalizer) {
 			return reconcile.Result{}, nil
@@ -204,15 +202,21 @@ func (r *ReconcileNamespaceConfig) Reconcile(request reconcile.Request) (reconci
 	resources, _, err := r.getKnowTypes()
 	if err == nil {
 		// object owned by this instance (will include legit and illegit ones)
-		labeledObjects := r.findAllLabeledObjects(resources, ownerSelector)
-		r.deleteObjectsOnControlledNamespaces(labeledObjects, objects, namespaces)
-		r.deleteObjectsOnUncontrolledNamespaces(labeledObjects, namespaces)
+		objects, err := getObjects(instance)
+		if err != nil {
+			log.Error(err, "unable to retrieve instance objects")
+		} else {
+			labeledObjects := r.findAllLabeledObjects(resources, ownerSelector)
+			r.deleteObjectsOnControlledNamespaces(labeledObjects, objects, namespaces)
+			r.deleteObjectsOnUncontrolledNamespaces(labeledObjects, namespaces)
+		}
 	} else {
 		log.Error(err, "unable to retrive known types, ignoring delete phase ...")
 	}
 	var err1 *multierror.Error
 	for _, ns := range namespaces {
-		err := r.applyConfigToNamespace(objects, ns, ownerLabelValue)
+		objects, err := getObjectsWithNamespace(instance, ns)
+		err = r.applyConfigToNamespace(objects, ns, ownerLabelValue)
 		if err != nil {
 			err1 = multierror.Append(err1, err)
 		}
@@ -221,6 +225,28 @@ func (r *ReconcileNamespaceConfig) Reconcile(request reconcile.Request) (reconci
 		return r.manageError(err1.ErrorOrNil(), instance)
 	}
 	return r.manageSuccess(instance)
+}
+
+func getObjectsWithNamespace(namespaceconfig *redhatcopv1alpha1.NamespaceConfig, namespace corev1.Namespace) ([]unstructured.Unstructured, error) {
+	objs := []unstructured.Unstructured{}
+	spew.Dump(namespace.GetName())
+	for _, raw := range namespaceconfig.Spec.Resources {
+		var yamlData = strings.Replace(string(raw.Raw), "$NAMESPACE", namespace.GetName(), -1)
+		bb, err := yaml.YAMLToJSON([]byte(yamlData))
+		spew.Dump(bb)
+		if err != nil {
+			log.Error(err, "Error transforming yaml to json", "raw", yamlData)
+			return []unstructured.Unstructured{}, err
+		}
+		obj := unstructured.Unstructured{}
+		err = json.Unmarshal(bb, &obj)
+		if err != nil {
+			log.Error(err, "Error unmarshalling json manifest", "manifest", string(bb))
+			return []unstructured.Unstructured{}, err
+		}
+		objs = append(objs, obj)
+	}
+	return objs, nil
 }
 
 func getObjects(namespaceconfig *redhatcopv1alpha1.NamespaceConfig) ([]unstructured.Unstructured, error) {
